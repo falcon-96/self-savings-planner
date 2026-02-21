@@ -1,10 +1,14 @@
 package com.blackrock_hackathon.self_savings_planner.service;
 
-import com.blackrock_hackathon.self_savings_planner.model.*;
-import com.blackrock_hackathon.self_savings_planner.model.specialPeriod.K;
-import com.blackrock_hackathon.self_savings_planner.model.validation.InvalidTransaction;
-import com.blackrock_hackathon.self_savings_planner.model.validation.TransactionValidationResult;
-import com.blackrock_hackathon.self_savings_planner.model.validation.ValidTransaction;
+import com.blackrock_hackathon.self_savings_planner.dto.common.TemporalData;
+import com.blackrock_hackathon.self_savings_planner.dto.period.K;
+import com.blackrock_hackathon.self_savings_planner.dto.request.FilterRequest;
+import com.blackrock_hackathon.self_savings_planner.dto.request.TransactionInput;
+import com.blackrock_hackathon.self_savings_planner.dto.request.ValidatorRequest;
+import com.blackrock_hackathon.self_savings_planner.dto.response.EnrichedTransaction;
+import com.blackrock_hackathon.self_savings_planner.dto.response.InvalidTransaction;
+import com.blackrock_hackathon.self_savings_planner.dto.response.ValidTransaction;
+import com.blackrock_hackathon.self_savings_planner.dto.response.ValidationResult;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -15,154 +19,111 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * Handles transaction parsing, validation, and filtering.
+ */
 @Service
 public class TransactionService {
-    public List<EnrichedTransaction> parseTransactions(List<TransactionCandidate> transactions) {
+
+    private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+
+    /** Rounds each transaction amount up to the nearest 100 and computes the remnant. */
+    public List<EnrichedTransaction> parseTransactions(List<TransactionInput> transactions) {
         return transactions.stream()
-                .map(transaction -> {
-                    double roundedCeiling = Math.ceil(transaction.amount() / 100.0) * 100.0;
-                    double remnant = roundedCeiling - transaction.amount();
-                    return new EnrichedTransaction(transaction.date(), transaction.amount(), roundedCeiling, remnant);
+                .map(tx -> {
+                    double ceiling = Math.ceil(tx.amount() / 100.0) * 100.0;
+                    return new EnrichedTransaction(tx.date(), tx.amount(), ceiling, ceiling - tx.amount());
                 })
                 .toList();
     }
 
-    public TransactionValidationResult validateTransactionWithWage(IncomeStatement incomeStatement) {
-        if (incomeStatement == null) {
-            return new TransactionValidationResult(List.of(), List.of());
-        }
-        return validateTransactionsInternal(incomeStatement.wage(), incomeStatement.transactions(), null);
+    /** Validates transactions against the wage cap. */
+    public ValidationResult validateTransactionWithWage(ValidatorRequest request) {
+        if (request == null) return new ValidationResult(List.of(), List.of());
+        double wage = request.wage() != null ? request.wage() : 0.0;
+        return validate(wage, request.transactions(), null);
     }
 
-    public TransactionValidationResult validateTransactionWithWageAndPeriods(
-            IncomeStatementWithSpecialPeriodData incomeStatementWithSpecialPeriodData) {
-        if (incomeStatementWithSpecialPeriodData == null) {
-            return new TransactionValidationResult(List.of(), List.of());
-        }
-        return validateTransactionsInternal(
-                incomeStatementWithSpecialPeriodData.wage(),
-                incomeStatementWithSpecialPeriodData.transactions(),
-                incomeStatementWithSpecialPeriodData.k()
-        );
+    /** Validates transactions and marks K-period membership. */
+    public ValidationResult validateTransactionWithWageAndPeriods(FilterRequest request) {
+        if (request == null) return new ValidationResult(List.of(), List.of());
+        double wage = request.wage() != null ? request.wage() : 0.0;
+        return validate(wage, request.transactions(), request.k());
     }
 
-    private TransactionValidationResult validateTransactionsInternal(
-            double wageValue,
-            List<TransactionCandidate> transactions,
-            List<K> kPeriods) {
-
+    private ValidationResult validate(double wageValue, List<? extends Record> transactions, List<K> kPeriods) {
         BigDecimal wage = BigDecimal.valueOf(wageValue);
         if (wage.compareTo(BigDecimal.ZERO) < 0) {
-            return new TransactionValidationResult(List.of(), List.of(new InvalidTransaction(null, wageValue, "Wage must be >= 0")));
+            return new ValidationResult(List.of(),
+                    List.of(new InvalidTransaction(null, wageValue, "Wage must be >= 0")));
         }
-
         if (transactions == null || transactions.isEmpty()) {
-            return new TransactionValidationResult(List.of(), List.of());
+            return new ValidationResult(List.of(), List.of());
         }
 
-        List<ValidTransaction> validTransactions = new ArrayList<>();
-        List<InvalidTransaction> invalidTransactions = new ArrayList<>();
-        BigDecimal validSum = BigDecimal.ZERO;
-        Set<String> seenTransactions = new HashSet<>();
+        List<ValidTransaction> valid = new ArrayList<>();
+        List<InvalidTransaction> invalid = new ArrayList<>();
+        BigDecimal runningSum = BigDecimal.ZERO;
+        Set<String> seen = new HashSet<>();
 
-        for (TransactionCandidate tx : transactions) {
-            if (!isTransactionValid(tx, wage, validSum, seenTransactions,
-                    validTransactions, invalidTransactions, kPeriods)) {
+        for (Record rec : transactions) {
+            LocalDateTime date;
+            Double amount;
+            double ceiling, remnant;
+
+            if (rec instanceof EnrichedTransaction et) {
+                date = et.date(); amount = et.amount(); ceiling = et.ceiling(); remnant = et.remnant();
+            } else if (rec instanceof TransactionInput ti) {
+                date = ti.date(); amount = ti.amount();
+                BigDecimal a = BigDecimal.valueOf(amount);
+                BigDecimal c = a.divide(HUNDRED, 0, RoundingMode.CEILING).multiply(HUNDRED);
+                ceiling = c.doubleValue(); remnant = c.subtract(a).doubleValue();
+            } else {
                 continue;
             }
-            validSum = validSum.add(BigDecimal.valueOf(tx.amount()));
+
+            // Null checks
+            if (date == null) { invalid.add(new InvalidTransaction(null, amount, "Date must not be null")); continue; }
+            if (amount == null) { invalid.add(new InvalidTransaction(date, null, "Amount must not be null")); continue; }
+
+            // Duplicate check
+            String key = date + "|" + amount;
+            if (!seen.add(key)) { invalid.add(new InvalidTransaction(date, amount, "Duplicate transaction")); continue; }
+
+            BigDecimal amtBD = BigDecimal.valueOf(amount);
+
+            // Amount range check
+            if (amtBD.compareTo(BigDecimal.ZERO) < 0) { invalid.add(new InvalidTransaction(date, amount, "Amount must be >= 0")); continue; }
+            if (amtBD.compareTo(wage) > 0) { invalid.add(new InvalidTransaction(date, amount, "Amount exceeds wage")); continue; }
+
+            // Ceiling/remnant accuracy check
+            BigDecimal expectedCeiling = amtBD.divide(HUNDRED, 0, RoundingMode.CEILING).multiply(HUNDRED);
+            BigDecimal expectedRemnant = expectedCeiling.subtract(amtBD);
+            if (Math.abs(ceiling - expectedCeiling.doubleValue()) > 1e-9) {
+                invalid.add(new InvalidTransaction(date, amount, "Ceiling mismatch")); continue;
+            }
+            if (Math.abs(remnant - expectedRemnant.doubleValue()) > 1e-9) {
+                invalid.add(new InvalidTransaction(date, amount, "Remnant mismatch")); continue;
+            }
+
+            // Wage cap check
+            if (runningSum.add(amtBD).compareTo(wage) > 0) {
+                invalid.add(new InvalidTransaction(date, amount, "Total exceeds wage")); continue;
+            }
+
+            runningSum = runningSum.add(amtBD);
+            valid.add(new ValidTransaction(date, amount, ceiling, remnant, inKPeriod(date, kPeriods)));
         }
 
-        return new TransactionValidationResult(validTransactions, invalidTransactions);
+        return new ValidationResult(valid, invalid);
     }
 
-    private boolean isTransactionValid(TransactionCandidate tx,
-                                       BigDecimal wage,
-                                       BigDecimal validSum,
-                                       Set<String> seenTransactions,
-                                       List<ValidTransaction> validTransactions,
-                                       List<InvalidTransaction> invalidTransactions,
-                                       List<K> kPeriods) {
-        if (tx == null) {
-            invalidTransactions.add(new InvalidTransaction(null, 0.0, "Transaction must not be null"));
-            return false;
-        }
-
-        if (tx.date() == null) {
-            invalidTransactions.add(new InvalidTransaction(null, tx.amount(), "Transaction date must not be null"));
-            return false;
-        }
-
-        String key = tx.date() + "|" + tx.amount();
-        if (!seenTransactions.add(key)) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Duplicate transaction detected"));
-            return false;
-        }
-
-        BigDecimal amount = BigDecimal.valueOf(tx.amount());
-        if (amount.compareTo(BigDecimal.ZERO) < 0) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Amount must be >= 0"));
-            return false;
-        }
-
-        if (amount.compareTo(wage) > 0) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Amount must be <= wage"));
-            return false;
-        }
-
-        if (!isCeilingAndRemnantValid(tx, amount, invalidTransactions)) {
-            return false;
-        }
-
-        if (validSum.add(amount).compareTo(wage) > 0) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Total of valid transactions must not exceed wage"));
-            return false;
-        }
-
-        boolean inKPeriod = isInKPeriod(tx.date(), kPeriods);
-
-        validTransactions.add(new ValidTransaction(
-                tx.date(),
-                tx.amount(),
-                tx.ceiling(),
-                tx.remnant(),
-                inKPeriod
-        ));
-        return true;
-    }
-
-    private boolean isCeilingAndRemnantValid(TransactionCandidate tx,
-                                             BigDecimal amount,
-                                             List<InvalidTransaction> invalidTransactions) {
-        BigDecimal expectedCeiling = amount
-                .divide(BigDecimal.valueOf(100), 0, RoundingMode.CEILING)
-                .multiply(BigDecimal.valueOf(100));
-        BigDecimal expectedRemnant = expectedCeiling.subtract(amount);
-
-        if (Math.abs(tx.ceiling() - expectedCeiling.doubleValue()) > 1e-9) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Ceiling is not accurate according to amount"));
-            return false;
-        }
-
-        if (Math.abs(tx.remnant() - expectedRemnant.doubleValue()) > 1e-9) {
-            invalidTransactions.add(new InvalidTransaction(tx.date(), tx.amount(), "Remnant is not accurate according to ceiling and amount"));
-            return false;
-        }
-
-        return true;
-    }
-
-
-    private boolean isInKPeriod(LocalDateTime date, List<K> kPeriods) {
-        if (kPeriods == null || kPeriods.isEmpty()) {
-            return false;
-        }
+    private boolean inKPeriod(LocalDateTime date, List<K> kPeriods) {
+        if (kPeriods == null) return false;
         for (K k : kPeriods) {
-            if (k.start() == null || k.end() == null) {
-                continue;
-            }
-            if ((date.isEqual(k.start()) || date.isEqual(k.end()))
-                    || (date.isAfter(k.start()) && date.isBefore(k.end()))) {
+            TemporalData td = k.temporalData();
+            if (td != null && td.start() != null && td.end() != null
+                    && !date.isBefore(td.start()) && !date.isAfter(td.end())) {
                 return true;
             }
         }

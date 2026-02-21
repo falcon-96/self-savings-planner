@@ -1,8 +1,12 @@
 package com.blackrock_hackathon.self_savings_planner.service;
 
-import com.blackrock_hackathon.self_savings_planner.model.IncomeStatement;
-import com.blackrock_hackathon.self_savings_planner.model.TransactionCandidate;
-import com.blackrock_hackathon.self_savings_planner.model.validation.TransactionValidationResult;
+import com.blackrock_hackathon.self_savings_planner.dto.request.TransactionInput;
+import com.blackrock_hackathon.self_savings_planner.dto.request.ValidatorRequest;
+import com.blackrock_hackathon.self_savings_planner.dto.response.EnrichedTransaction;
+import com.blackrock_hackathon.self_savings_planner.dto.response.ValidationResult;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
@@ -12,63 +16,139 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class TransactionServiceTest {
 
-    private final TransactionService transactionService = new TransactionService();
+    private TransactionService service;
 
-    @Test
-    void validateTransactionWithWage_partitionsValidAndInvalid_andEnforcesTotalWageCap() {
-        IncomeStatement incomeStatement = new IncomeStatement(
-                50000,
-                List.of(
-                        // invalid: ceiling/remnant wrong
-                        new TransactionCandidate(LocalDateTime.parse("2023-01-15T10:30:00"), 2000, 300, 50),
-                        new TransactionCandidate(LocalDateTime.parse("2023-03-20T14:45:00"), 3500, 400, 70),
-                        new TransactionCandidate(LocalDateTime.parse("2023-06-10T09:15:00"), 1500, 200, 30),
-                        // invalid: amount < 0
-                        new TransactionCandidate(LocalDateTime.parse("2023-07-10T09:15:00"), -250, 200, 30)
-                )
-        );
-
-        TransactionValidationResult result = transactionService.validateTransactionWithWage(incomeStatement);
-
-        assertNotNull(result);
-        assertEquals(0, result.validTransactions().size());
-        assertEquals(4, result.invalidTransactions().size());
-        assertTrue(result.invalidTransactions().stream().anyMatch(t -> t.message().contains("Amount must be >= 0")));
+    @BeforeEach
+    void setUp() {
+        service = new TransactionService();
     }
 
-    @Test
-    void validateTransactionWithWage_marksValid_whenCeilingAndRemnantMatchNearest100Rule() {
-        IncomeStatement incomeStatement = new IncomeStatement(
-                50000,
-                List.of(
-                        new TransactionCandidate(LocalDateTime.parse("2023-01-15T10:30:00"), 2000, 2000, 0),
-                        new TransactionCandidate(LocalDateTime.parse("2023-03-20T14:45:00"), 3500, 3500, 0),
-                        new TransactionCandidate(LocalDateTime.parse("2023-06-10T09:15:00"), 1501, 1600, 99)
-                )
-        );
+    @Nested
+    @DisplayName("parseTransactions")
+    class ParseTests {
 
-        TransactionValidationResult result = transactionService.validateTransactionWithWage(incomeStatement);
+        @Test
+        @DisplayName("rounds up to nearest 100 and computes remnant")
+        void roundsUpCorrectly() {
+            var input = List.of(
+                    tx("2023-01-01 10:00:00", 375),
+                    tx("2023-02-01 10:00:00", 620),
+                    tx("2023-03-01 10:00:00", 100),
+                    tx("2023-04-01 10:00:00", 99)
+            );
 
-        assertNotNull(result);
-        assertEquals(3, result.validTransactions().size());
-        assertEquals(0, result.invalidTransactions().size());
+            List<EnrichedTransaction> result = service.parseTransactions(input);
+
+            assertEquals(4, result.size());
+            assertEnriched(result.get(0), 375, 400, 25);
+            assertEnriched(result.get(1), 620, 700, 80);
+            assertEnriched(result.get(2), 100, 100, 0);
+            assertEnriched(result.get(3), 99, 100, 1);
+        }
+
+        @Test
+        @DisplayName("empty list returns empty")
+        void emptyInput() {
+            assertTrue(service.parseTransactions(List.of()).isEmpty());
+        }
     }
 
-    @Test
-    void validateTransactionWithWage_invalidWhenValidSumWouldExceedWage() {
-        IncomeStatement incomeStatement = new IncomeStatement(
-                3000,
-                List.of(
-                        new TransactionCandidate(LocalDateTime.parse("2023-01-15T10:30:00"), 2000, 2000, 0),
-                        // would exceed wage if accepted
-                        new TransactionCandidate(LocalDateTime.parse("2023-03-20T14:45:00"), 1501, 1600, 99)
-                )
-        );
+    @Nested
+    @DisplayName("validateTransactionWithWage")
+    class ValidationTests {
 
-        TransactionValidationResult result = transactionService.validateTransactionWithWage(incomeStatement);
+        @Test
+        @DisplayName("valid transactions pass all checks")
+        void validTransactionsPass() {
+            var request = new ValidatorRequest(50000.0, List.of(
+                    enriched("2023-01-15 08:00:00", 375, 400, 25),
+                    enriched("2023-03-20 12:00:00", 620, 700, 80)
+            ));
 
-        assertEquals(1, result.validTransactions().size());
-        assertEquals(1, result.invalidTransactions().size());
-        assertTrue(result.invalidTransactions().getFirst().message().contains("Total of valid transactions"));
+            ValidationResult result = service.validateTransactionWithWage(request);
+
+            assertEquals(2, result.validTransactions().size());
+            assertTrue(result.invalidTransactions().isEmpty());
+        }
+
+        @Test
+        @DisplayName("negative amount is rejected")
+        void negativeAmountRejected() {
+            var request = new ValidatorRequest(50000.0, List.of(
+                    enriched("2023-01-15 08:00:00", -10, 0, 0)
+            ));
+
+            ValidationResult result = service.validateTransactionWithWage(request);
+
+            assertTrue(result.validTransactions().isEmpty());
+            assertEquals(1, result.invalidTransactions().size());
+            assertTrue(result.invalidTransactions().getFirst().message().contains(">="));
+        }
+
+        @Test
+        @DisplayName("duplicate transactions are rejected")
+        void duplicatesRejected() {
+            var request = new ValidatorRequest(50000.0, List.of(
+                    enriched("2023-01-15 08:00:00", 375, 400, 25),
+                    enriched("2023-01-15 08:00:00", 375, 400, 25)
+            ));
+
+            ValidationResult result = service.validateTransactionWithWage(request);
+
+            assertEquals(1, result.validTransactions().size());
+            assertEquals(1, result.invalidTransactions().size());
+            assertTrue(result.invalidTransactions().getFirst().message().contains("Duplicate"));
+        }
+
+        @Test
+        @DisplayName("amount exceeding wage is rejected")
+        void exceedsWageRejected() {
+            var request = new ValidatorRequest(100.0, List.of(
+                    enriched("2023-01-15 08:00:00", 200, 200, 0)
+            ));
+
+            ValidationResult result = service.validateTransactionWithWage(request);
+
+            assertTrue(result.validTransactions().isEmpty());
+            assertEquals(1, result.invalidTransactions().size());
+        }
+
+        @Test
+        @DisplayName("wrong ceiling is rejected")
+        void wrongCeilingRejected() {
+            var request = new ValidatorRequest(50000.0, List.of(
+                    enriched("2023-01-15 08:00:00", 375, 500, 125)  // ceiling should be 400
+            ));
+
+            ValidationResult result = service.validateTransactionWithWage(request);
+
+            assertTrue(result.validTransactions().isEmpty());
+            assertEquals(1, result.invalidTransactions().size());
+            assertTrue(result.invalidTransactions().getFirst().message().contains("Ceiling"));
+        }
+
+        @Test
+        @DisplayName("null request returns empty result")
+        void nullRequest() {
+            ValidationResult result = service.validateTransactionWithWage(null);
+            assertTrue(result.validTransactions().isEmpty());
+            assertTrue(result.invalidTransactions().isEmpty());
+        }
+    }
+
+    // helpers
+
+    private static TransactionInput tx(String datetime, double amount) {
+        return new TransactionInput(LocalDateTime.parse(datetime.replace(" ", "T")), amount);
+    }
+
+    private static EnrichedTransaction enriched(String datetime, double amount, double ceiling, double remnant) {
+        return new EnrichedTransaction(LocalDateTime.parse(datetime.replace(" ", "T")), amount, ceiling, remnant);
+    }
+
+    private static void assertEnriched(EnrichedTransaction et, double expectedAmount, double expectedCeiling, double expectedRemnant) {
+        assertEquals(expectedAmount, et.amount(), 1e-9);
+        assertEquals(expectedCeiling, et.ceiling(), 1e-9);
+        assertEquals(expectedRemnant, et.remnant(), 1e-9);
     }
 }

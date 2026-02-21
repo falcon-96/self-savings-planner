@@ -1,14 +1,12 @@
-package com.blackrock_hackathon.self_savings_planner.model;
+package com.blackrock_hackathon.self_savings_planner.dto.request;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 
 import java.time.LocalDateTime;
 
-public record TransactionCandidate(
+public record TransactionInput(
         @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
         LocalDateTime date,
-        double amount,
-        double ceiling,
-        double remnant
+        Double amount
 ) {
 }

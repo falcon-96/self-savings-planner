@@ -1,3 +1,6 @@
 spring:
   application:
     name: self-savings-planner
+
+server:
+  port: 5477
