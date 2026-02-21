@@ -72,10 +72,10 @@ Expense ₹375  →  Ceiling ₹400  →  Remnant ₹25 (auto-saved)
 5. Inflation adjustment: `A_real = A / (1 + inflation)^years`
 6. Tax benefit (NPS only): Section 80CCD, `min(invested, 10% income, ₹2L)`
 
-| Strategy         | Annual Rate | Tax Benefit     |
-|------------------|-------------|-----------------|
-| NPS              | 7.11%       | ✅ Section 80CCD |
-| Index (NIFTY 50) | 14.49%      | ❌               |
+| Strategy         | Annual Rate |
+|------------------|-------------|
+| NPS              | 7.11%       |
+| Index (NIFTY 50) | 14.49%      |
 
 ---
 
@@ -176,17 +176,6 @@ src/main/java/.../
 ```bash
 ./mvnw test
 ```
-
-17 unit tests covering:
-
-- Transaction parsing (ceiling/remnant math)
-- Validation rules (duplicates, negatives, wage cap, ceiling mismatch)
-- Q/P/K period rule application
-- NPS and Index return calculations
-- Tax slab computation
-- Edge cases (age ≥ 60, negative transactions, outside K period)
-
----
 
 ## Tech Stack
 
